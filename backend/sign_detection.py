@@ -1,52 +1,45 @@
+# backend/sign_detection.py
+
 import cv2
 import numpy as np
-import tensorflow as tf
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.image import img_to_array
 import os
 
-# Load trained model
-model = tf.keras.models.load_model("backend/models/sign_model.h5")
+IMG_SIZE = (64,64)
+dataset_path = r"C:\Users\totek\Documents\GitHub\GuardianX\dataset\sign_language"
+model_path = r"C:\Users\totek\Documents\GitHub\GuardianX\backend\sign_model.h5"
 
-# Labels (must match your dataset folder names)
-LABELS = sorted(os.listdir("dataset/train"))  
+# --------- Load model ---------
+classes = sorted(os.listdir(dataset_path))
+model = load_model(model_path)
+print("Model loaded successfully!")
+print("Detected gesture classes:", classes)
 
-IMG_SIZE = 64  # must match training size
+# --------- Start camera ---------
+cap = cv2.VideoCapture(0)
 
-def preprocess_frame(frame):
-    img = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # grayscale
-    img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
-    img = img / 255.0
-    return img.reshape(1, IMG_SIZE, IMG_SIZE, 1)
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-def run_sign_detection(source=0):
-    cap = cv2.VideoCapture(source)
+    # Preprocess frame
+    img = cv2.resize(frame, IMG_SIZE)
+    img = img_to_array(img)/255.0
+    img = np.expand_dims(img, axis=0)
 
-    if not cap.isOpened():
-        print("❌ Error: Could not open camera/video")
-        return
+    # Predict gesture
+    pred = model.predict(img)
+    gesture = classes[np.argmax(pred)]
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    # Display result
+    cv2.putText(frame, f"Gesture: {gesture}", (10,30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+    cv2.imshow("Sign Language Detection", frame)
 
-        roi = frame[100:400, 100:400]  # Crop region for hand
-        processed = preprocess_frame(roi)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-        # Prediction
-        preds = model.predict(processed, verbose=0)
-        class_id = np.argmax(preds)
-        confidence = np.max(preds)
-
-        label = f"{LABELS[class_id]} ({confidence*100:.1f}%)"
-
-        # Draw UI
-        cv2.rectangle(frame, (100, 100), (400, 400), (0, 255, 0), 2)
-        cv2.putText(frame, label, (100, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-
-        cv2.imshow("🤟 GuardianX - Sign Detection", frame)
-
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
+cap.release()
+cv2.destroyAllWindows()

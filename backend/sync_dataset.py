@@ -6,7 +6,7 @@ from watchdog.events import FileSystemEventHandler
 
 # Paths
 source_folder = r"C:\Users\totek\Desktop\Indian"
-destination_folder = r"C:\Users\totek\Documents\GitHub\GuardianX\dataset"
+destination_folder = r"C:\Users\totek\Documents\GitHub\GuardianX\dataset\sign_language"
 
 # Create destination folder if it doesn't exist
 os.makedirs(destination_folder, exist_ok=True)

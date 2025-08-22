@@ -1,222 +1,118 @@
-# backend/sign_language.py
-import os
-import argparse
-import json
+# type: ignore
+import tensorflow as tf
 import cv2
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras import layers, models
-from tensorflow.keras.preprocessing import image_dataset_from_directory
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.image import img_to_array
+from collections import deque, Counter
+import time
+import winsound  # for simple beep sound (Windows)
 
-# ----------------------------
-# Config
-# ----------------------------
-DATASET_DIR = os.path.join(os.path.dirname(__file__), "dataset")    # backend/dataset/
-MODELS_DIR  = os.path.join(os.path.dirname(__file__), "models")     # backend/models/
-MODEL_PATH  = os.path.join(MODELS_DIR, "sign_model.h5")
-LABELS_PATH = os.path.join(MODELS_DIR, "sign_labels.txt")
-MAP_PATH    = os.path.join(MODELS_DIR, "label_map.json")            # optional
+# Load trained model
+model = load_model('sign_language_model.h5')
 
-IMG_SIZE    = (64, 64)
-BATCH_SIZE  = 32
-EPOCHS      = 12  # bump if you have time / data
+# Mini dataset gestures
+GESTURES = ['1', '2', '3', 'A', 'B', 'C']
 
-# ----------------------------
-# Utils
-# ----------------------------
-def ensure_dirs():
-    os.makedirs(MODELS_DIR, exist_ok=True)
+# Camera capture (default 0 for webcam)
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
-def load_label_map_if_any(labels):
-    """
-    Optional: if backend/models/label_map.json exists (e.g. {"0":"A","1":"B", ...}),
-    we map numeric folder names to human-friendly names.
-    """
-    if os.path.isfile(MAP_PATH):
-        try:
-            with open(MAP_PATH, "r") as f:
-                m = json.load(f)
-            return [m.get(lbl, lbl) for lbl in labels]
-        except Exception:
-            pass
-    return labels
 
-# ----------------------------
-# Data
-# ----------------------------
-def make_datasets():
-    """
-    Expects backend/dataset/<class_folder> with images inside.
-    Class folder names can be '0','1',... or words like 'Hello'.
-    """
-    if not os.path.isdir(DATASET_DIR):
-        raise FileNotFoundError(f"Dataset not found at {DATASET_DIR}")
+# Prediction buffer and word tracking
+buffer = deque(maxlen=10)
+current_word = ""
+last_letter = ""
+no_detection_frames = 0
+NO_DETECTION_THRESHOLD = 15
 
-    train_ds = image_dataset_from_directory(
-        DATASET_DIR,
-        labels="inferred",
-        label_mode="int",
-        image_size=IMG_SIZE,
-        batch_size=BATCH_SIZE,
-        validation_split=0.2,
-        subset="training",
-        seed=1337,
-        shuffle=True,
-    )
-    val_ds = image_dataset_from_directory(
-        DATASET_DIR,
-        labels="inferred",
-        label_mode="int",
-        image_size=IMG_SIZE,
-        batch_size=BATCH_SIZE,
-        validation_split=0.2,
-        subset="validation",
-        seed=1337,
-        shuffle=True,
-    )
+# Animation timing
+last_update_time = time.time()
+ANIMATION_DELAY = 0.1  # seconds between updates
 
-    # cache + prefetch for speed
-    AUTOTUNE = tf.data.AUTOTUNE
-    norm = tf.keras.Sequential([layers.Rescaling(1./255)])
-    train_ds = train_ds.map(lambda x, y: (norm(x), y)).cache().prefetch(AUTOTUNE)
-    val_ds   = val_ds.map(lambda x, y: (norm(x), y)).cache().prefetch(AUTOTUNE)
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-    # class names derived from folder names (strings)
-    class_names = list(train_ds.class_names)  # e.g. ["0","1","2"] or ["Hello","Yes",...]
-    class_names = load_label_map_if_any(class_names)
+    frame = cv2.flip(frame, 1)  # Mirror effect
 
-    return train_ds, val_ds, class_names
+    # ROI
+    x0, y0, width, height = 100, 100, 300, 300
+    roi = frame[y0:y0+height, x0:x0+width]
 
-# ----------------------------
-# Model
-# ----------------------------
-def build_model(num_classes):
-    model = models.Sequential([
-        layers.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3)),
-        layers.Conv2D(32, 3, activation="relu"),
-        layers.MaxPooling2D(),
-        layers.Conv2D(64, 3, activation="relu"),
-        layers.MaxPooling2D(),
-        layers.Conv2D(128, 3, activation="relu"),
-        layers.MaxPooling2D(),
-        layers.Flatten(),
-        layers.Dense(128, activation="relu"),
-        layers.Dropout(0.5),
-        layers.Dense(num_classes, activation="softmax"),
-    ])
-    model.compile(optimizer="adam",
-                  loss="sparse_categorical_crossentropy",
-                  metrics=["accuracy"])
-    return model
+    # Preprocess
+    roi_resized = cv2.resize(roi, (64, 64))
+    roi_array = img_to_array(roi_resized)
+    roi_array = np.expand_dims(roi_array, axis=0) / 255.0
 
-# ----------------------------
-# Train
-# ----------------------------
-def train():
-    ensure_dirs()
-    train_ds, val_ds, class_names = make_datasets()
-    print(f"Classes ({len(class_names)}): {class_names}")
+    # Predict
+    preds = model.predict(roi_array, verbose=0)
+    gesture_idx = np.argmax(preds[0])
+    confidence = preds[0][gesture_idx]
+    gesture_name = GESTURES[gesture_idx] if confidence > 0.3 else None  # lower threshold for small dataset
 
-    model = build_model(num_classes=len(class_names))
-    history = model.fit(train_ds, validation_data=val_ds, epochs=EPOCHS)
-
-    model.save(MODEL_PATH)
-    with open(LABELS_PATH, "w") as f:
-        for c in class_names:
-            f.write(c + "\n")
-
-    print(f"✅ Saved model -> {MODEL_PATH}")
-    print(f"✅ Saved labels -> {LABELS_PATH}")
-
-# ----------------------------
-# Predict helpers
-# ----------------------------
-def load_model_and_labels():
-    if not os.path.isfile(MODEL_PATH):
-        raise FileNotFoundError("Model not found. Train first with: python backend/sign_language.py --train")
-
-    model = tf.keras.models.load_model(MODEL_PATH)
-    if not os.path.isfile(LABELS_PATH):
-        raise FileNotFoundError("Labels file not found. Train first to generate it.")
-    with open(LABELS_PATH, "r") as f:
-        labels = [line.strip() for line in f if line.strip()]
-    return model, labels
-
-def preprocess_bgr_frame(frame_bgr):
-    img = cv2.resize(frame_bgr, IMG_SIZE)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = img.astype(np.float32) / 255.0
-    return np.expand_dims(img, axis=0)
-
-# ----------------------------
-# Realtime webcam
-# ----------------------------
-def realtime(cam_index=0):
-    model, labels = load_model_and_labels()
-    cap = cv2.VideoCapture(cam_index)
-    if not cap.isOpened():
-        print("❌ Could not open webcam")
-        return
-
-    print("🎥 Realtime sign recognition running. Press 'q' to quit.")
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-
-        # (Optional) draw a guide box for consistent ROI
-        # x1,y1,x2,y2 = 100, 60, 420, 380
-        # roi = frame[y1:y2, x1:x2]
-        roi = frame  # using full frame is simpler to start
-
-        inp = preprocess_bgr_frame(roi)
-        preds = model.predict(inp, verbose=0)[0]
-        idx = int(np.argmax(preds))
-        conf = float(np.max(preds))
-        label = labels[idx] if idx < len(labels) else f"#{idx}"
-
-        cv2.putText(frame, f"{label} ({conf*100:.1f}%)", (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-        cv2.imshow("GuardianX — Sign Recognition", frame)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-# ----------------------------
-# Single image test
-# ----------------------------
-def predict_image(path):
-    if not os.path.isfile(path):
-        print(f"❌ File not found: {path}")
-        return
-    model, labels = load_model_and_labels()
-    bgr = cv2.imread(path)
-    inp = preprocess_bgr_frame(bgr)
-    preds = model.predict(inp, verbose=0)[0]
-    idx = int(np.argmax(preds))
-    conf = float(np.max(preds))
-    label = labels[idx] if idx < len(labels) else f"#{idx}"
-    print(f"🖼️ {os.path.basename(path)} -> {label} ({conf*100:.1f}%)")
-
-# ----------------------------
-# CLI
-# ----------------------------
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GuardianX Sign Language (TensorFlow)")
-    parser.add_argument("--train", action="store_true", help="Train on backend/dataset/")
-    parser.add_argument("--realtime", action="store_true", help="Run webcam recognition")
-    parser.add_argument("--image", type=str, help="Predict a single image path")
-    parser.add_argument("--cam", type=int, default=0, help="Webcam index (default 0)")
-    args = parser.parse_args()
-
-    if args.train:
-        train()
-    elif args.realtime:
-        realtime(cam_index=args.cam)
-    elif args.image:
-        predict_image(args.image)
+    # Update buffer
+    if gesture_name:
+        buffer.append(gesture_name)
+        no_detection_frames = 0
     else:
-        print("Nothing to do. Use one of: --train | --realtime | --image path/to.jpg")
+        no_detection_frames += 1
+
+    # Determine most common letter
+    most_common = Counter(buffer).most_common(1)[0][0] if buffer else None
+
+    # Add to current word if changed and delay passed
+    if most_common and most_common != last_letter and time.time() - last_update_time > ANIMATION_DELAY:
+        current_word += most_common
+        last_letter = most_common
+        last_update_time = time.time()
+        winsound.Beep(1000, 100)  # optional sound feedback
+
+    # Add space if no detection
+    if no_detection_frames >= NO_DETECTION_THRESHOLD:
+        current_word += " "
+        last_letter = ""
+        buffer.clear()
+        no_detection_frames = 0
+
+    # Draw ROI
+    cv2.rectangle(frame, (x0, y0), (x0+width, y0+height), (0, 255, 0), 2)
+
+    # Overlays
+    overlay = frame.copy()
+    # Letter panel
+    cv2.rectangle(overlay, (x0, y0-50), (x0+width, y0), (0, 0, 0), -1)
+    # Word panel
+    cv2.rectangle(overlay, (50, 20), (600, 80), (0, 0, 0), -1)
+    frame = cv2.addWeighted(overlay, 0.6, frame, 0.4, 0)
+
+    # Letter color based on confidence
+    if confidence > 0.8:
+        color = (0, 255, 0)
+    elif confidence > 0.5:
+        color = (0, 255, 255)
+    else:
+        color = (0, 0, 255)
+
+    # Current letter
+    if most_common:
+        letter_text = f"{most_common} ({confidence*100:.1f}%)"
+        cv2.putText(frame, letter_text, (x0 + 10, y0 - 15),
+                    cv2.FONT_HERSHEY_DUPLEX, 1.5, color, 3, cv2.LINE_AA)
+
+    # Current word
+    cv2.putText(frame, f"Word: {current_word}", (60, 65),
+                cv2.FONT_HERSHEY_DUPLEX, 2.0, (255, 255, 0), 4, cv2.LINE_AA)
+
+    # Show frame
+    cv2.imshow("Sign Language Detection", frame)
+
+    # Key actions
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord('q'):
+        break
+    elif key == ord('r'):
+        current_word = ""  # Reset word
+
+cap.release()
+cv2.destroyAllWindows()
